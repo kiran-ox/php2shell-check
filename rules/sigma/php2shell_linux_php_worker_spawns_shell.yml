@@ -1,0 +1,95 @@
+title: PHP Web Worker Spawns Shell, Interpreter or Network Tool
+id: a82b3ab7-ee5a-45b9-a49a-f7addc7e146d
+status: experimental
+description: |
+    Detects a PHP web worker (php-fpm, php-cgi, LiteSpeed lsphp, FrankenPHP, or Apache httpd/apache2 running mod_php)
+    starting a shell, scripting interpreter, network tool or reconnaissance command. This is a typical first step after
+    remote code execution through PHP2Shell (CVE-2026-109618, CVE-2026-109619) or through a web shell.
+    The shell that PHP mail() starts is excluded only in its exact form, sh -c followed by a common mailer path (for
+    example sh -c /usr/sbin/sendmail -t -i), and only when the command line has no ; | & $( or backtick, so a command
+    chained after the mailer is still detected.
+references:
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+author: OX Security
+date: 2026-10-21
+tags:
+    - attack.initial-access
+    - attack.t1190
+    - attack.execution
+    - attack.t1059.004
+    - attack.persistence
+    - attack.t1505.003
+    - cve.2026-109618
+    - cve.2026-109619
+logsource:
+    product: linux
+    category: process_creation
+detection:
+    selection_parent_name:
+        ParentImage|endswith:
+            - '/frankenphp'
+            - '/apache2'
+            - '/httpd'
+    selection_parent_versioned:
+        # php-fpm, php-fpm8.3, php-fpm83, php-cgi8.2, lsphp, ...
+        ParentImage|re: '/(php-fpm|php-cgi|lsphp)[0-9.]*$'
+    selection_child_name:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/dash'
+            - '/ash'
+            - '/zsh'
+            - '/ksh'
+            - '/csh'
+            - '/tcsh'
+            - '/busybox'
+            - '/perl'
+            - '/ruby'
+            - '/lua'
+            - '/nc'
+            - '/ncat'
+            - '/netcat'
+            - '/socat'
+            - '/curl'
+            - '/wget'
+            - '/telnet'
+            - '/openssl'
+            - '/base64'
+            - '/whoami'
+            - '/id'
+            - '/uname'
+    selection_child_python:
+        Image|re: '/python[0-9.]*$'
+    filter_main_php_mail:
+        # PHP mail() runs sendmail_path through popen(), which starts: sh -c '<sendmail_path> [extra parameters]'
+        Image|endswith:
+            - '/sh'
+            - '/ash'
+            - '/dash'
+            - '/bash'
+            - '/busybox'
+        CommandLine|startswith:
+            - 'sh -c /usr/sbin/sendmail '
+            - 'sh -c /usr/bin/sendmail '
+            - 'sh -c /usr/lib/sendmail '
+            - 'sh -c sendmail '
+            - 'sh -c /usr/sbin/exim '
+            - 'sh -c /usr/sbin/exim4 '
+            - 'sh -c /usr/bin/msmtp '
+            - 'sh -c /usr/sbin/ssmtp '
+    shell_metacharacters:
+        # A command list, pipe or command substitution runs more than the mailer.
+        CommandLine|contains:
+            - ';'
+            - '|'
+            - '&'
+            - '$('
+            - '`'
+    condition: 1 of selection_parent_* and 1 of selection_child_* and not (filter_main_php_mail and not shell_metacharacters)
+falsepositives:
+    - Applications that legitimately run external commands with exec(), shell_exec(), system() or proc_open(), such as image or PDF processing, git or composer
+    - PHP mail() with a mailer path not listed in the filter, or with extra parameters that contain shell metacharacters
+    - CGI scripts run by Apache httpd without PHP
+level: high

@@ -1,0 +1,73 @@
+title: PHP-FPM Worker Crash or Pre-Script Out-Of-Memory
+name: php2shell_php_fpm_crash
+id: 01f41ffa-a5a1-44bc-b9bb-a2e2535f43cc
+status: experimental
+description: |
+    Detects PHP-FPM worker crashes (SIGILL, SIGABRT, SIGBUS, SIGFPE, SIGSEGV), Zend heap corruption, and out-of-memory
+    errors raised before any script runs ("in Unknown on line 0"). Exploitation attempts against the PHP2Shell
+    memory-corruption bugs (CVE-2026-109618, CVE-2026-109619) produce these messages; CVE-2026-109618 is driven by
+    out-of-memory during request parsing.
+    Custom log source: the PHP-FPM error log (error_log in php-fpm.conf, for example /var/log/php8.3-fpm.log) and the
+    PHP error_log, read as raw text lines. It is not part of the Sigma log source taxonomy; map product php and service
+    php-fpm to those logs in your pipeline.
+references:
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+author: OX Security
+date: 2026-10-21
+tags:
+    - attack.initial-access
+    - attack.t1190
+    - cve.2026-109618
+    - cve.2026-109619
+logsource:
+    product: php
+    service: php-fpm
+    definition: 'Custom log source: PHP-FPM master error log and PHP error_log lines, searched as raw text'
+detection:
+    keywords_crash:
+        - 'exited on signal 4'
+        - 'exited on signal 6'
+        - 'exited on signal 7'
+        - 'exited on signal 8'
+        - 'exited on signal 11'
+        - 'zend_mm_heap corrupted'
+    keywords_oom:
+        - 'Allowed memory size of'
+    keywords_prescript:
+        - 'in Unknown on line 0'
+    condition: keywords_crash or (keywords_oom and keywords_prescript)
+falsepositives:
+    - PHP extensions that crash workers under normal load
+    - Legitimate requests that exhaust memory_limit while PHP parses large request bodies
+level: medium
+---
+title: PHP-FPM Worker Crash Burst
+id: e9e41b1f-c623-4713-8a15-d42c384810f6
+status: experimental
+description: |
+    Five or more PHP-FPM crash or pre-script out-of-memory events within ten minutes. Exploiting the PHP2Shell bugs
+    (CVE-2026-109618, CVE-2026-109619) takes many attempts against workers, so such bursts are a strong signal.
+    Add group-by on the field that holds the host name in your pipeline so bursts are counted per server.
+references:
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+author: OX Security
+date: 2026-10-21
+tags:
+    - attack.initial-access
+    - attack.t1190
+    - cve.2026-109618
+    - cve.2026-109619
+correlation:
+    type: event_count
+    rules:
+        - php2shell_php_fpm_crash
+    # group-by:
+    #     - host
+    timespan: 10m
+    condition:
+        gte: 5
+falsepositives:
+    - A PHP extension that crashes repeatedly under normal load
+level: high

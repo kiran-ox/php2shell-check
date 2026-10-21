@@ -1,0 +1,95 @@
+id: php2shell-version-banner
+
+info:
+  name: PHP2Shell - PHP Version Banner Before Fix (CVE-2026-109618 / CVE-2026-109619)
+  author: ox-security
+  severity: high
+  description: |
+    Detects a PHP version advertised in the X-Powered-By or Server response header that predates the fixes for
+    CVE-2026-109618 and CVE-2026-109619 ("PHP2Shell", unauthenticated remote code execution). Fixed releases are
+    8.5.12, 8.4.27, 8.3.36 and 8.2.35. A pre-release of a fixed release (for example 8.5.12RC1) comes before it.
+    PHP 8.1 and older are end-of-life and get no fix from the PHP project.
+    Pre-release builds of 8.6 and 8.7 (alpha, beta, RC, dev; master is 8.7.0-dev) do not have the fix yet and are
+    reported by the prerelease matcher. Release builds of 8.6 or 8.7, and newer branches, are not matched: the
+    banner cannot show whether they include the fix.
+    This check is banner-based and passive: it sends one GET request and only reads response headers.
+    Linux distributions and LTS vendors backport fixes without changing the upstream version, so a match can be a
+    false positive. Servers that hide or rewrite the banner (expose_php=Off, reverse proxies, CDNs) give false
+    negatives. Confirm on the host with php2shell-check.sh.
+    Use only against assets you own or are authorized to test.
+  reference:
+    - https://www.php.net/archive/2026.php#2026-10-21-5
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+  classification:
+    cvss-score: 9.2
+    cve-id: CVE-2026-109618,CVE-2026-109619
+    cwe-id: CWE-416
+    cpe: cpe:2.3:a:php:php:*:*:*:*:*:*:*:*
+  metadata:
+    verified: false
+    max-request: 1
+    vendor: php
+    product: php
+    cvss-v4-vector: "CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+  tags: cve,cve2026,php,php2shell,passive,version
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+
+    host-redirects: true
+    max-redirects: 2
+
+    extractors:
+      # Bare x.y.z for compare_versions. A vendor suffix (8.1.2-1ubuntu2.20) does not change the upstream
+      # version, and compare_versions must not see it: it would read it as a pre-release.
+      - type: regex
+        name: version
+        part: header
+        group: 1
+        internal: true
+        regex:
+          - '(?i)(?:x-powered-by|server):[^\r\n]*?\bPHP/([0-9]+\.[0-9]+\.[0-9]+)'
+
+      # The x.y.z of a pre-release banner (alpha, beta, RC, dev, with or without "-"). A pre-release sorts before
+      # its release, so 8.5.12RC1 sets prerelease_of to 8.5.12 and counts as before the fixed 8.5.12.
+      - type: regex
+        name: prerelease_of
+        part: header
+        group: 1
+        internal: true
+        regex:
+          - '(?i)(?:x-powered-by|server):[^\r\n]*?\bPHP/([0-9]+\.[0-9]+\.[0-9]+)-?(?:alpha|beta|rc|dev)'
+
+      # Full banner version, including vendor or pre-release suffix, for the report.
+      - type: regex
+        part: header
+        group: 1
+        regex:
+          - '(?i)(?:x-powered-by|server):[^\r\n]*?\bPHP/([0-9]+\.[0-9]+\.[0-9]+[^\s,;)]*)'
+
+    matchers-condition: or
+    matchers:
+      # An expression whose variable was not extracted (no PHP banner, or no pre-release suffix) is false.
+      - type: dsl
+        name: before-fixed-version
+        condition: or
+        dsl:
+          - 'compare_versions(version, "< 8.2.0")'
+          - 'compare_versions(version, ">= 8.2.0", "< 8.2.35")'
+          - 'compare_versions(version, ">= 8.3.0", "< 8.3.36")'
+          - 'compare_versions(version, ">= 8.4.0", "< 8.4.27")'
+          - 'compare_versions(version, ">= 8.5.0", "< 8.5.12")'
+          - 'prerelease_of == "8.2.35"'
+          - 'prerelease_of == "8.3.36"'
+          - 'prerelease_of == "8.4.27"'
+          - 'prerelease_of == "8.5.12"'
+
+      # 8.6 pre-releases and master (8.7.0-dev) without the fix.
+      - type: regex
+        name: prerelease
+        part: header
+        regex:
+          - '(?i)(?:x-powered-by|server):[^\r\n]*?\bPHP/8\.[67]\.[0-9]+-?(?:alpha|beta|rc|dev)'

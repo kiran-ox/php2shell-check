@@ -1,0 +1,139 @@
+name: windows
+
+on:
+  push:
+    paths:
+      - 'php2shell-check.ps1'
+      - 'tests/ps1/**'
+      - 'data/php2shell.json'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'php2shell-check.ps1'
+      - 'tests/ps1/**'
+      - 'data/php2shell.json'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ps1:
+    name: ps1 (${{ matrix.shell }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show PowerShell version
+        run: $PSVersionTable | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Install Pester 5 and PSScriptAnalyzer if missing
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -lt 6) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          }
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -ge [version]'5.5.0' })) {
+            Install-Module -Name Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+          }
+
+      - name: PSScriptAnalyzer (fail on Error)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module PSScriptAnalyzer
+          # -Path takes a single string: analyze each file and collect the results.
+          $all = [System.Collections.Generic.List[object]]::new()
+          foreach ($file in @('./php2shell-check.ps1', './tests/ps1/php2shell-check.Tests.ps1')) {
+            foreach ($r in @(Invoke-ScriptAnalyzer -Path $file)) { $all.Add($r) }
+          }
+          Write-Host ("PSScriptAnalyzer: {0} result(s)" -f $all.Count)
+          $all | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 300 | Write-Host
+          $errors = @($all | Where-Object { $_.Severity -eq 'Error' -or $_.Severity -eq 'ParseError' })
+          if ($errors.Count -gt 0) { throw "PSScriptAnalyzer reported $($errors.Count) error(s)" }
+
+      - name: Pester
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -MinimumVersion 5.5.0
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = './tests/ps1'
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $cfg
+
+      - name: Smoke run (-Json, StrictMode)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version 2.0
+          foreach ($extra in @(@{ SkipIoc = $true }, @{})) {
+            $out = & ./php2shell-check.ps1 -Json @extra
+            $code = $LASTEXITCODE
+            $report = ($out -join "`n") | ConvertFrom-Json
+            Write-Host ("args: {0} | exit {1} | verdict {2} | installations {3} | findings {4}" -f (@($extra.Keys) -join ' '), $code, $report.summary.verdict, $report.summary.installations, @($report.findings).Count)
+            if ($report.tool -ne 'php2shell-check' -or $report.checker -ne 'ps1') { throw 'unexpected tool/checker fields' }
+            if ($report.host.platform -ne 'windows') { throw 'unexpected platform' }
+            if ($code -ne [int]$report.summary.exit_code) { throw "exit code $code does not match summary.exit_code $($report.summary.exit_code)" }
+            if ($code -ge 64) { throw "usage error ($code)" }
+            if (($out -join "`n") -match '[^\x00-\x7E]') { throw 'JSON output is not ASCII (non-ASCII must be \u-escaped)' }
+            if (@('VULNERABLE', 'FIXED', 'NO_PHP_FOUND', 'INCOMPLETE') -notcontains $report.summary.verdict) { throw 'unexpected verdict' }
+            foreach ($i in @($report.installations)) {
+              if (@('VULNERABLE', 'FIXED', 'UNKNOWN') -notcontains $i.verdict) { throw "bad installation verdict $($i.verdict)" }
+              foreach ($k in @('processes', 'restart_required', 'version', 'verdict')) {
+                if ($null -eq $i.running.PSObject.Properties[$k]) { throw "running.$k missing for $($i.path)" }
+              }
+              Write-Host ("  {0} {1} {2} {3} ({4})" -f $i.verdict, $i.version, $i.sapi, $i.path, $i.reason)
+            }
+          }
+          # The runner's own PHP may be vulnerable (exit 1); that is not a test failure.
+          $global:LASTEXITCODE = 0
+
+      - name: Smoke run (text, -Help, bad -Since)
+        run: |
+          & ./php2shell-check.ps1 -NoColor -SkipIoc | Out-String | Write-Host
+          & ./php2shell-check.ps1 -Help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "-Help exited $LASTEXITCODE" }
+          & ./php2shell-check.ps1 -Since 'not-a-date' | Out-Null
+          if ($LASTEXITCODE -ne 64) { throw "bad -Since exited $LASTEXITCODE, expected 64" }
+          & ./php2shell-check.ps1 -Bogus | Out-Null
+          if ($LASTEXITCODE -ne 64) { throw "unknown parameter exited $LASTEXITCODE, expected 64" }
+          $global:LASTEXITCODE = 0
+
+      - name: Smoke run (powershell -File, comma-separated -WebRoot, unknown arguments)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The same PowerShell edition as this matrix leg, started the way RMM tools do.
+          $exe = (Get-Process -Id $PID).Path
+          $site = Join-Path $env:RUNNER_TEMP 'p2s-site'
+          $missing = Join-Path $env:RUNNER_TEMP 'p2s-missing-site'
+          New-Item -ItemType Directory -Path $site -Force | Out-Null
+          $out = & $exe -NoProfile -ExecutionPolicy Bypass -File ./php2shell-check.ps1 -Json -WebRoot "$site,$missing"
+          $code = $LASTEXITCODE
+          if ($code -ge 64) { throw "-WebRoot a,b under -File exited $code" }
+          $report = ($out -join "`n") | ConvertFrom-Json
+          $notFound = @($report.coverage | Where-Object { $_ -like '-WebRoot folder not found*' })
+          if (@($notFound | Where-Object { $_.EndsWith($missing) }).Count -ne 1) { throw 'the missing -WebRoot folder is not noted in coverage' }
+          if (@($notFound | Where-Object { $_.EndsWith($site) }).Count -ne 0) { throw 'the existing -WebRoot folder was reported as missing' }
+          foreach ($bad in @('-Bogus', '-Jsno', 'stray-value')) {
+            & $exe -NoProfile -ExecutionPolicy Bypass -File ./php2shell-check.ps1 $bad | Out-Null
+            if ($LASTEXITCODE -ne 64) { throw "argument '$bad' under -File exited $LASTEXITCODE, expected 64" }
+          }
+          $global:LASTEXITCODE = 0

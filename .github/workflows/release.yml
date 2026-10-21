@@ -1,0 +1,99 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build, sign and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the tool version
+        run: |
+          set -eu
+          want=${GITHUB_REF_NAME#v}
+          have=$(sed -n 's/^TOOL_VERSION=//p' php2shell-check.sh | head -n 1)
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match TOOL_VERSION=$have in php2shell-check.sh"
+            exit 1
+          fi
+
+      - name: Run the test suite before publishing
+        run: |
+          set -eu
+          sh tests/run.sh
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: 'v2.6.1'
+
+      - name: Stage release files and build SHA256SUMS
+        run: |
+          set -eu
+          mkdir dist
+          for f in php2shell-check.sh php2shell-check.ps1 probe/php2shell-probe.php \
+                   rules/nuclei/*.yaml rules/sigma/*.yml data/php2shell.json; do
+            # A missing file (or a glob that matched nothing) stops the release.
+            if [ ! -f "$f" ]; then
+              echo "::error::release file missing: $f"
+              exit 1
+            fi
+            b=$(basename "$f")
+            if [ -e "dist/$b" ]; then
+              echo "::error::duplicate release file name: $b"
+              exit 1
+            fi
+            cp "$f" "dist/$b"
+          done
+          cd dist
+          ls -1 > ../files.txt
+          [ -s ../files.txt ] || { echo "::error::no release files"; exit 1; }
+          # shellcheck disable=SC2046
+          sha256sum $(cat ../files.txt) > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Sign with cosign (keyless)
+        run: |
+          set -eu
+          cd dist
+          # Each file gets a Sigstore bundle (<file>.sigstore.json, the format
+          # newer cosign versions verify with --bundle) plus the separate
+          # signature and certificate for older ones.
+          for f in $(cat ../files.txt) SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" \
+              --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+          done
+          ls -l
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          cd dist
+          gh release create "$GITHUB_REF_NAME" ./* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

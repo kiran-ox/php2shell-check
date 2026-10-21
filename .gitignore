@@ -1,0 +1,17 @@
+# Reports and scratch output (data/php2shell.json is tracked)
+/reports/
+/php2shell*.json
+*.log
+
+# Editors and OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Release staging and CI scratch files
+/dist/
+/files.txt
+/r.json
+/report.*

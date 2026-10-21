@@ -1,0 +1,52 @@
+title: PHP or Web Server Process Spawns Windows Shell or LOLBin
+id: 5d649841-6a70-45bf-bf44-1fc5841fe9dc
+status: experimental
+description: |
+    Detects php-cgi.exe, php.exe, Apache httpd.exe or the IIS worker w3wp.exe starting a command shell, PowerShell or a
+    living-off-the-land binary that attackers and web shells commonly use after remote code execution, for example
+    after exploitation of PHP2Shell (CVE-2026-109618, CVE-2026-109619) on Windows.
+references:
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+author: OX Security
+date: 2026-10-21
+tags:
+    - attack.initial-access
+    - attack.t1190
+    - attack.execution
+    - attack.t1059.001
+    - attack.t1059.003
+    - attack.persistence
+    - attack.t1505.003
+    - cve.2026-109618
+    - cve.2026-109619
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '\php-cgi.exe'
+            - '\php.exe'
+            - '\httpd.exe'
+            - '\w3wp.exe'
+    selection_child:
+        Image|endswith:
+            - '\cmd.exe'
+            - '\powershell.exe'
+            - '\pwsh.exe'
+            - '\certutil.exe'
+            - '\bitsadmin.exe'
+            - '\mshta.exe'
+            - '\rundll32.exe'
+            - '\regsvr32.exe'
+            - '\wscript.exe'
+            - '\cscript.exe'
+            - '\curl.exe'
+            - '\whoami.exe'
+    condition: selection_parent and selection_child
+falsepositives:
+    - PHP command-line scripts run by administrators or scheduled tasks that call system tools (composer, artisan, deployment scripts)
+    - Web applications that legitimately run external commands
+    - ASP.NET applications under w3wp.exe that start command-line tools
+level: high

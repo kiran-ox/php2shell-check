@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "data_version": "2026-10-21.1",
+  "generated_at": "2026-10-21T13:50:00Z",
+  "name": "PHP2Shell",
+  "advisory": "https://www.php.net/archive/2026.php#2026-10-21-5",
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2026-109618",
+      "ghsa": "GHSA-w8hw-w9fx-j79w",
+      "title": "RCE via OOM corruption",
+      "cvss_v4": {
+        "score": 9.2,
+        "vector": "CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+      },
+      "cwe": ["CWE-416", "CWE-755", "CWE-824", "CWE-1325", "CWE-1419"],
+      "url": "https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w"
+    },
+    {
+      "cve": "CVE-2026-109619",
+      "ghsa": "GHSA-6wmf-4rv5-p3rp",
+      "title": "RCE via stale global state",
+      "cvss_v4": {
+        "score": 9.2,
+        "vector": "CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+      },
+      "cwe": ["CWE-416", "CWE-755", "CWE-824", "CWE-1325", "CWE-1419"],
+      "url": "https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp"
+    }
+  ],
+  "fix_commit": "506e87fa7dcdd306975e5b8f8265ee03527aacbf",
+  "branches": [
+    { "branch": "8.5", "status": "supported", "fixed": "8.5.12" },
+    { "branch": "8.4", "status": "supported", "fixed": "8.4.27" },
+    { "branch": "8.3", "status": "supported", "fixed": "8.3.36" },
+    { "branch": "8.2", "status": "supported", "fixed": "8.2.35", "security_support_ends": "2026-12-31" },
+    { "branch": "8.1", "status": "eol", "fixed": null, "source_backport": "https://github.com/php/php-src/tree/PHP-8.1-CVE-2026-109618-109619" },
+    { "branch": "8.0", "status": "eol", "fixed": null, "source_backport": "https://github.com/php/php-src/tree/PHP-8.0-CVE-2026-109618-109619" },
+    { "branch": "7.4", "status": "eol", "fixed": null, "source_backport": "https://github.com/php/php-src/tree/PHP-7.4-CVE-2026-109618-109619" },
+    { "branch": "7.0-7.3", "status": "eol", "fixed": null },
+    { "branch": "5.x", "status": "eol", "fixed": null },
+    { "branch": "8.6", "status": "prerelease", "fixed": null, "note": "Fix not merged into PHP-8.6 as of 2026-10-21 13:42 UTC. Pre-release builds without the patch fingerprint are vulnerable." },
+    { "branch": "8.7", "status": "development", "fixed": null, "note": "master (8.7.0-dev); fix not merged as of 2026-10-21. Pre-release builds (8.7.0-dev) without the patch fingerprint are vulnerable, like 8.6 pre-releases (SPEC section 3 rule 7)." }
+  ],
+  "patch_fingerprints": [
+    {
+      "string": "Hard memory limit of ",
+      "source": "Zend/zend_alloc.c zend_mm_hard_limit_error(), added by the fix commit",
+      "verified_in_tags": ["php-8.2.35", "php-8.5.12"],
+      "absent_in_tags": ["php-8.4.26", "php-8.1.34", "php-8.0.30", "php-7.4.33"]
+    },
+    {
+      "string": "memory_hard_limit_percent",
+      "source": "main/main.c INI entry, added by the fix commit"
+    }
+  ],
+  "fingerprint_limitations": "PHP's minimal source backports for 7.4, 8.0 and 8.1 (branches PHP-x.y-CVE-2026-109618-109619) do not add these strings and keep the old version number. They cannot be told apart from unpatched builds by inspecting the binary. Only vendor evidence (package changelog naming the CVE) counts for those.",
+  "sapi_exposure": [
+    { "sapi": "mod_php", "risk": "highest", "detail": "PHP advisory: unauthenticated pre-application RCE demonstrated (request shutdown runs even after failed startup)." },
+    { "sapi": "frankenphp", "risk": "high", "detail": "PHP advisory: calls request shutdown unconditionally like mod_php; likely susceptible to application-independent attacks." },
+    { "sapi": "fpm", "risk": "high", "detail": "PHP advisory: CVE-2026-109619 RCE validated via session upload progress; CVE-2026-109618 susceptible by source analysis." },
+    { "sapi": "litespeed", "risk": "elevated", "detail": "PHP advisory: LSAPI models FPM; application-specific exploits likely but unvalidated." },
+    { "sapi": "cgi", "risk": "elevated", "detail": "php.net lists php-cgi among installations at risk when serving web requests." },
+    { "sapi": "cli", "risk": "low", "detail": "Not a web SAPI. Only at risk if it is used to serve web requests." }
+  ],
+  "interim_mitigations": [
+    { "cve": "CVE-2026-109618", "setting": "memory_limit=-1", "how": "Administratively (php_admin_value in FPM pool or Apache config); ensure nothing restores a finite limit; restart every worker.", "complete": false },
+    { "cve": "CVE-2026-109618", "setting": "post_max_size=8M (32M if uploads are needed)", "how": "Plus frontend limits on decoded body size, field/part/header counts and nesting, including requests without a usable Content-Length.", "complete": false },
+    { "cve": "CVE-2026-109618", "setting": "Do NOT use RLIMIT_AS / RLIMIT_DATA", "how": "These cause the vulnerable allocation failure.", "complete": false },
+    { "cve": "CVE-2026-109619", "setting": "session.upload_progress.enabled=0", "how": "In php.ini, FPM pool or server config applied before request parsing (not ini_set() or .user.ini); restart every worker.", "complete": false },
+    { "cve": "CVE-2026-109619", "setting": "fatal_error_backtraces=0 (PHP 8.5; default On)", "how": "Administratively; restart every worker. Blocks the confirmed fatal-backtrace path only.", "complete": false },
+    { "cve": "CVE-2026-109619", "setting": "Remove invalid/deprecated per-request INI settings", "how": "php_value/.htaccess (mod_php) and fastcgi_param PHP_VALUE/PHP_ADMIN_VALUE (FPM) that emit diagnostics before request initialization. Hiding diagnostics does not help.", "complete": false }
+  ],
+  "vendor_notes": [
+    { "vendor": "remi", "note": "php.net: rpms.remirepo.net will not have updates on 2026-10-21; switch to distribution packages or build from source." }
+  ],
+  "vendor_backports": [],
+  "sources": [
+    "https://www.php.net/archive/2026.php#2026-10-21-5",
+    "https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w",
+    "https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp",
+    "https://github.com/php/php-src/commit/506e87fa7dcdd306975e5b8f8265ee03527aacbf"
+  ]
+}

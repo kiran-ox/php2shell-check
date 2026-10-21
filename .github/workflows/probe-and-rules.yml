@@ -1,0 +1,317 @@
+name: probe-and-rules
+
+on:
+  push:
+    paths:
+      - 'probe/**'
+      - 'rules/**'
+      - 'data/php2shell.json'
+      - '.github/workflows/probe-and-rules.yml'
+  pull_request:
+    paths:
+      - 'probe/**'
+      - 'rules/**'
+      - 'data/php2shell.json'
+      - '.github/workflows/probe-and-rules.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe-lint:
+    name: php -l (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['5.6', '7.4', '8.1', '8.2', '8.3', '8.4', '8.5']
+    env:
+      PHP_IMAGE: php:${{ matrix.php }}-cli
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the probe
+        run: docker run --rm -v "$PWD/probe:/probe:ro" "$PHP_IMAGE" php -l /probe/php2shell-probe.php
+
+  probe-lint-optional:
+    name: php -l (${{ matrix.label }}, if an image exists)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The first image in the list that can be pulled is used. When none
+          # can be pulled, the job passes with a notice.
+          - label: PHP 8.6 pre-release
+            images: 'php:8.6-rc-cli php:8.6-rc php:8.6-cli'
+          - label: oldest PHP 5 (5.3, else 5.4, else 5.5)
+            images: 'php:5.3-cli php:5.3 php:5.4-cli php:5.4 php:5.5-cli php:5.5'
+    env:
+      IMAGES: ${{ matrix.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the probe with the first image that can be pulled
+        run: |
+          set -eu
+          for img in $IMAGES; do
+            if docker pull -q "$img" > /dev/null 2>&1; then
+              echo "Linting with $img"
+              docker run --rm -v "$PWD/probe:/probe:ro" "$img" php -l /probe/php2shell-probe.php
+              exit 0
+            fi
+            echo "::notice::$img could not be pulled"
+          done
+          echo "::notice::None of $IMAGES could be pulled; lint skipped"
+
+  probe-data-sync:
+    name: probe and Nuclei data match data/php2shell.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare the probe's embedded data
+        run: |
+          set -eu
+          probe=probe/php2shell-probe.php
+          dv=$(jq -r '.data_version' data/php2shell.json)
+          grep -q "'data_version' => '$dv'" "$probe" || { echo "probe data_version is not $dv"; exit 1; }
+          jq -r '.branches[] | select(.fixed != null) | "\(.branch) \(.fixed)"' data/php2shell.json |
+          while read -r branch fixed; do
+            grep -q "'$branch' => '$fixed'" "$probe" || { echo "probe is missing $branch => $fixed"; exit 1; }
+          done
+          # 8.6 (prerelease) and master 8.7 (development) have no fix yet.
+          jq -r '.branches[] | select(.status == "prerelease" or .status == "development") | .branch' data/php2shell.json |
+          while read -r branch; do
+            grep -q "'prerelease' => array(.*'$branch'" "$probe" || { echo "probe is missing prerelease branch $branch"; exit 1; }
+          done
+          oldest=$(jq -r '[.branches[] | select(.status == "supported") | .branch] | sort_by(split(".") | map(tonumber)) | first' data/php2shell.json)
+          grep -q "'oldest_supported' => '$oldest'" "$probe" || { echo "probe oldest_supported is not $oldest"; exit 1; }
+          jq -e '.patch_fingerprints[] | select(.string == "memory_hard_limit_percent")' data/php2shell.json > /dev/null
+          grep -q "'fingerprint_ini' => 'memory_hard_limit_percent'" "$probe"
+      - name: Compare the Nuclei template's fixed versions
+        run: |
+          set -eu
+          tpl=rules/nuclei/php2shell-version-banner.yaml
+          data=data/php2shell.json
+          oldest=$(jq -r '[.branches[] | select(.status == "supported") | .branch] | sort_by(split(".") | map(tonumber)) | first' "$data")
+          grep -qF "compare_versions(version, \"< $oldest.0\")" "$tpl" || { echo "::error::template lacks the end-of-life bound < $oldest.0"; exit 1; }
+          jq -r '.branches[] | select(.fixed != null) | "\(.branch) \(.fixed)"' "$data" |
+          while read -r branch fixed; do
+            grep -qF "compare_versions(version, \">= $branch.0\", \"< $fixed\")" "$tpl" || { echo "::error::template lacks >= $branch.0, < $fixed"; exit 1; }
+            grep -qF "prerelease_of == \"$fixed\"" "$tpl" || { echo "::error::template lacks the pre-release check for $fixed"; exit 1; }
+          done
+          # No stale fixed versions either.
+          want=$( { echo "$oldest.0"; jq -r '.branches[] | select(.fixed != null) | .fixed' "$data"; } | sort -u | tr '\n' ' ')
+          have=$(grep -oE '"< [0-9]+\.[0-9]+\.[0-9]+"' "$tpl" | tr -d '"< ' | sort -u | tr '\n' ' ')
+          [ "$want" = "$have" ] || { echo "::error::template upper bounds ($have) differ from data ($want)"; exit 1; }
+          want=$(jq -r '.branches[] | select(.fixed != null) | .fixed' "$data" | sort -u | tr '\n' ' ')
+          have=$(grep -oE 'prerelease_of == "[0-9.]+"' "$tpl" | sed 's/.*"\(.*\)"/\1/' | sort -u | tr '\n' ' ')
+          [ "$want" = "$have" ] || { echo "::error::template pre-release checks ($have) differ from data ($want)"; exit 1; }
+          echo "Nuclei template matches $data: $want"
+
+  probe-functional:
+    name: functional (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.5']
+    env:
+      PHP_IMAGE: php:${{ matrix.php }}-cli
+      TOKEN: ci-test-token-0123456789abcdef
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare a web root with a test token
+        run: |
+          set -eu
+          www="$RUNNER_TEMP/www"
+          mkdir -p "$www"
+          sed "s/^define('PROBE_TOKEN', '[^']*');/define('PROBE_TOKEN', '$TOKEN');/" probe/php2shell-probe.php > "$www/probe.php"
+          grep -q "define('PROBE_TOKEN', '$TOKEN');" "$www/probe.php"
+          cp probe/php2shell-probe.php "$www/placeholder.php"
+      - name: Start php -S
+        run: |
+          docker run -d --name probe -p 127.0.0.1:8080:8080 -v "$RUNNER_TEMP/www:/www" "$PHP_IMAGE" php -S 0.0.0.0:8080 -t /www
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:8080/; then exit 0; fi
+            sleep 1
+          done
+          docker logs probe
+          exit 1
+      - name: Refuses a missing, wrong or placeholder token
+        run: |
+          set -eu
+          base=http://127.0.0.1:8080
+          wrong=wrong-token-0123456789abcdef
+          placeholder=CHANGE-ME-TO-A-LONG-RANDOM-STRING
+          status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(status "$base/probe.php")" = 403
+          test "$(status "$base/probe.php?token=$wrong")" = 403
+          test "$(status -H "X-Probe-Token: $wrong" "$base/probe.php")" = 403
+          # When the header is sent, the query string is not looked at.
+          test "$(status -H "X-Probe-Token: $wrong" "$base/probe.php?token=$TOKEN")" = 403
+          test "$(status "$base/placeholder.php?token=$placeholder")" = 403
+          test "$(status -H "X-Probe-Token: $placeholder" "$base/placeholder.php")" = 403
+          test "$(curl -s "$base/probe.php?token=$wrong")" = Forbidden
+          test "$(curl -s -H "X-Probe-Token: $wrong" "$base/probe.php")" = Forbidden
+          test -f "$RUNNER_TEMP/www/probe.php"
+          test -f "$RUNNER_TEMP/www/placeholder.php"
+      - name: JSON report with the header token and keep=1
+        run: |
+          set -eu
+          curl -sf -D headers.txt -o report.json -H "X-Probe-Token: $TOKEN" "http://127.0.0.1:8080/probe.php?format=json&keep=1"
+          cat report.json
+          grep -qi '^content-type: application/json' headers.txt
+          grep -qi '^cache-control: no-store' headers.txt
+          grep -qi '^x-robots-tag: noindex, nofollow' headers.txt
+          jq -e '.tool == "php2shell-check" and .checker == "probe" and .host.platform == "web"' report.json
+          jq -e --arg dv "$(jq -r '.data_version' data/php2shell.json)" '.data_version == $dv and (.installations | length) == 1' report.json
+          jq -e 'has("since") and .since == null' report.json
+          jq -e '.installations[0].verdict | IN("VULNERABLE", "FIXED", "UNKNOWN")' report.json
+          jq -e '.installations[0] as $i | $i.running.version == $i.version and $i.running.verdict == $i.verdict' report.json
+          jq -e '(.installations[0].patch_fingerprint != true) or (.installations[0].verdict == "FIXED")' report.json
+          # A web probe never reports FIXED: its coverage is always limited (exit bit 2).
+          jq -e '.summary.verdict | IN("VULNERABLE", "INCOMPLETE")' report.json
+          jq -e '(.summary.verdict == "VULNERABLE") == (.installations[0].verdict == "VULNERABLE")' report.json
+          jq -e '(.summary.exit_code % 2 == 1) == (.installations[0].verdict == "VULNERABLE")' report.json
+          jq -e '(.summary.exit_code / 2 | floor) % 2 == 1' report.json
+          jq -e '.probe.self_delete == "skipped (keep=1)"' report.json
+          test -f "$RUNNER_TEMP/www/probe.php"
+      - name: The token in the query string still works
+        run: |
+          set -eu
+          curl -sf -o report2.json "http://127.0.0.1:8080/probe.php?token=$TOKEN&format=json&keep=1"
+          jq -e '.tool == "php2shell-check" and .probe.self_delete == "skipped (keep=1)"' report2.json
+          test -f "$RUNNER_TEMP/www/probe.php"
+      - name: Text report deletes the probe
+        run: |
+          set -eu
+          curl -sf -o report.txt -H "X-Probe-Token: $TOKEN" "http://127.0.0.1:8080/probe.php"
+          cat report.txt
+          grep -q '^Verdict: ' report.txt
+          grep -q '^Self-delete: deleted' report.txt
+          test ! -e "$RUNNER_TEMP/www/probe.php"
+      - name: Stop the server
+        if: always()
+        run: docker rm -f probe || true
+
+  nuclei-validate:
+    name: nuclei (validate and banner tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NUCLEI_IMAGE: projectdiscovery/nuclei:v3.11.1@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate the template
+        run: docker run --rm -v "$PWD/rules/nuclei:/templates:ro" "$NUCLEI_IMAGE" -duc -validate -t /templates/php2shell-version-banner.yaml
+      - name: Match test banners derived from data/php2shell.json
+        run: |
+          set -eu
+          data=data/php2shell.json
+          work="$RUNNER_TEMP/nuclei"
+          mkdir -p "$work"
+          cases="$work/cases.txt"
+          # One case per line: the version sent as X-Powered-By: PHP/<version>,
+          # then the matcher that must match ("-" for none).
+          jq -r '.branches[] | select(.fixed != null) | .fixed' "$data" |
+          while IFS=. read -r maj min pat; do
+            echo "$maj.$min.$pat -"
+            echo "$maj.$min.$pat-1ubuntu1 -"
+            echo "$maj.$min.${pat}RC1 before-fixed-version"
+            if [ "$pat" -gt 0 ]; then
+              echo "$maj.$min.$((pat - 1)) before-fixed-version"
+              echo "$maj.$min.$((pat - 1))-1ubuntu1 before-fixed-version"
+            fi
+          done > "$cases"
+          jq -r '.branches[] | select(.status == "prerelease" or .status == "development") | .branch' "$data" |
+          while read -r branch; do
+            echo "$branch.0alpha1 prerelease"
+            echo "$branch.0RC1 prerelease"
+            echo "$branch.0-dev prerelease"
+            echo "$branch.0 -"
+          done >> "$cases"
+          # The first branch newer than the data is not matched, pre-release or not.
+          next=$(jq -r '[.branches[].branch | select(test("^[0-9]+\\.[0-9]+$")) | split(".") | map(tonumber)] | max | "\(.[0]).\(.[1] + 1)"' "$data")
+          printf '%s\n' "$next.0RC1 -" "$next.0 -" '8.1.34 before-fixed-version' '8.1.2-1ubuntu2.20 before-fixed-version' \
+            '7.4.33 before-fixed-version' '5.6.40 before-fixed-version' >> "$cases"
+          sed 's|^\([^ ]*\) .*$|http://127.0.0.1:8081/\1|' "$cases" > "$work/urls.txt"
+          cat > "$work/banner.py" <<'EOF'
+          import http.server
+
+
+          class Banner(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('X-Powered-By', 'PHP/' + self.path.lstrip('/'))
+                  self.send_header('Content-Length', '0')
+                  self.end_headers()
+
+              def version_string(self):
+                  return 'banner-test'
+
+              def log_message(self, *args):
+                  pass
+
+
+          http.server.ThreadingHTTPServer(('127.0.0.1', 8081), Banner).serve_forever()
+          EOF
+          python3 "$work/banner.py" > "$work/server.log" 2>&1 &
+          server=$!
+          trap 'kill "$server" 2> /dev/null || true' EXIT
+          i=0
+          until curl -s -o /dev/null http://127.0.0.1:8081/0.0.0; do
+            i=$((i + 1))
+            [ "$i" -le 30 ] || { cat "$work/server.log"; exit 1; }
+            sleep 1
+          done
+          docker run --rm --network host -v "$PWD/rules/nuclei:/templates:ro" -v "$work:/work:ro" "$NUCLEI_IMAGE" \
+            -duc -ni -nc -silent -jsonl -t /templates/php2shell-version-banner.yaml -l /work/urls.txt > "$work/raw.jsonl"
+          grep '^{' "$work/raw.jsonl" > "$work/results.jsonl" || true
+          jq -c '{at: ."matched-at", matcher: ."matcher-name", extracted: ."extracted-results"}' "$work/results.jsonl"
+          fail=0
+          while read -r v want; do
+            got=$(jq -r --arg v "$v" 'select(((."matched-at" // "") | sub("^[a-z]+://[^/]+/"; "")) == $v) | (."matcher-name" // "unnamed")' "$work/results.jsonl" | sort -u | paste -sd, -)
+            [ -n "$got" ] || got=-
+            if [ "$got" = "$want" ]; then
+              echo "ok   PHP/$v -> $got"
+            else
+              echo "::error::PHP/$v: expected $want, got $got"
+              fail=1
+            fi
+          done < "$cases"
+          exit "$fail"
+
+  sigma-check:
+    name: sigma check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install sigma-cli with a pinned pySigma
+        # sigma-cli 3.1.0 accepts pySigma >=1.3.0,<2.0.0; 1.5.1 is the newest 1.x.
+        run: python -m pip install --disable-pip-version-check 'sigma-cli==3.1.0' 'pysigma==1.5.1'
+      - name: Validate the rules
+        run: sigma check --fail-on-issues rules/sigma
