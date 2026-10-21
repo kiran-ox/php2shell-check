@@ -24,8 +24,9 @@ concurrency:
 
 jobs:
   ps1:
-    name: ps1 (${{ matrix.shell }})
-    runs-on: windows-latest
+    name: ps1 (windows-2025, ${{ matrix.shell }})
+    # Pinned: a new windows-latest image cannot change the test machine unannounced.
+    runs-on: windows-2025
     timeout-minutes: 20
     strategy:
       fail-fast: false
