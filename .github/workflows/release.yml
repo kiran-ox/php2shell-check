@@ -38,6 +38,13 @@ jobs:
             exit 1
           fi
 
+      # The same tools as ci.yml. The runner's preinstalled busybox-static runs
+      # its own ps and lsof applets instead of the test shims on PATH.
+      - name: Install shells and jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dash busybox jq
+
       - name: Run the test suite before publishing
         run: |
           set -eu
